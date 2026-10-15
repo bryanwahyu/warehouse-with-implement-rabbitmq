@@ -1,66 +1,91 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# Warehouse Management System
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Inventory and production backend for a small manufacturer, built with Laravel 10. It tracks raw materials (bahan) and finished products, turns materials into products through recipes and production runs, and handles purchase orders, sales orders and stock history. Every stock movement on raw materials is published to RabbitMQ.
 
-## About Laravel
+## What it does
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+- Raw materials and products, each with categories, units (satuan), stock in, stock out and stock-opname.
+- Recipes: how much of each material one unit of a product needs.
+- Production runs with a small state machine:
+  - `menyiapkan` → `Proses` takes the materials out of stock, scaled by recipe × quantity.
+  - `Proses` → `Completed` books the produced quantity into product stock.
+  - `Proses` → `Failure` closes the run without adding stock.
+- Purchase orders with suppliers, and sales orders with customers, status and payment.
+- Stock history for every movement, plus Excel import/export (templates, stock-opname, PO requests) via `maatwebsite/excel`.
+- REST API under `/api/v1`, protected with Laravel Passport, and a Blade admin panel.
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+## Architecture
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+```
+app/Http/Controllers/API/V1   single-action controllers, one per endpoint
+src/Domain/<Context>/Actions  use cases (CreateMasukBahanAction, ChangeStatusProduksiAction, ...)
+src/Domain/<Context>/Filter   query filters for list endpoints
+src/Infra/<Context>/Models    Eloquent models
+src/Infra/Shared              base Action, controller, response helpers, RabbitMQService
+```
 
-## Learning Laravel
+Controllers only parse the request and call one Action. Business rules live in `src/Domain`, persistence in `src/Infra`. Bounded contexts: Bahan, Product, Produksi, PurchaseOrder, SalesOrder, Customer, History, User.
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
+### RabbitMQ
 
-You may also try the [Laravel Bootcamp](https://bootcamp.laravel.com), where you will be guided through building a modern Laravel application from scratch.
+`Infra\Shared\Services\RabbitMQService` publishes a JSON message to the queue named by `RABBITMQ_QUEUE` whenever raw-material stock moves:
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains over 2000 video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+- `CreateMasukBahanAction` (stock in)
+- `CreateKeluarBahanAction` (stock out, including materials consumed by a production run)
+- `ImportMasukKeluarAction` (bulk import from Excel)
 
-## Laravel Sponsors
+The message is the same payload written to `history_stoks`, so a consumer (notifications, reporting, a sync to another system) can react to stock changes without polling the database. `RabbitMQService::consume()` is a reference consumer that logs each message.
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the Laravel [Patreon page](https://patreon.com/taylorotwell).
+## Running it
 
-### Premium Partners
+Requirements: PHP 8.1+, Composer, MySQL, RabbitMQ.
 
-- **[Vehikl](https://vehikl.com/)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Cubet Techno Labs](https://cubettech.com)**
-- **[Cyber-Duck](https://cyber-duck.co.uk)**
-- **[Many](https://www.many.co.uk)**
-- **[Webdock, Fast VPS Hosting](https://www.webdock.io/en)**
-- **[DevSquad](https://devsquad.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel/)**
-- **[OP.GG](https://op.gg)**
-- **[WebReinvent](https://webreinvent.com/?utm_source=laravel&utm_medium=github&utm_campaign=patreon-sponsors)**
-- **[Lendio](https://lendio.com)**
+```bash
+composer install
+cp vendor/laravel/laravel/.env.example .env 2>/dev/null || touch .env   # then fill DB_* and the RABBITMQ_* keys below
+php artisan key:generate
+php artisan migrate --seed
+php artisan passport:install
+php artisan serve
+```
 
-## Contributing
+RabbitMQ settings in `.env`:
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+```
+RABBITMQ_HOST=127.0.0.1
+RABBITMQ_PORT=5672
+RABBITMQ_USER=guest
+RABBITMQ_PASSWORD=guest
+RABBITMQ_QUEUE=stock
+```
 
-## Code of Conduct
+A quick local broker: `docker run -d -p 5672:5672 -p 15672:15672 rabbitmq:3-management`.
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+`docker-compose.yml` runs the app on PHP-FPM behind nginx; point it at your own MySQL and RabbitMQ.
 
-## Security Vulnerabilities
+## API overview
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+All routes except `POST /api/v1/login` need a Passport bearer token.
+
+| Resource | Routes |
+|---|---|
+| Auth | `POST login`, `GET auth` |
+| Raw materials | `bahan`, `category`, `satuan`, `masuk`, `keluar` |
+| Products | `product`, `product-category`, `product-satuan`, `product-masuk`, `product-keluar` |
+| Production | `recipe`, `production`, `PATCH production/{id}/{status}` |
+| Purchasing | `supplier`, `purchase-order`, `detail-po`, `PATCH purchase-order/{id}/{status}` |
+| Sales | `customer`, `sales-order`, `detail-sales-order`, `PATCH sales-order/{id}/{status}/{payment}` |
+| History | `history`, `product-history` |
+
+The full list is in `routes/api/v1.php`.
+
+## Known limitations
+
+- The stock-movement message is published before the surrounding database transaction commits, so a rollback can leave a message for a movement that never happened. The fix is a transactional outbox or publishing after commit (`DB::afterCommit`).
+- Stock is updated with read-modify-write on the model, without a row lock, so two concurrent movements on the same item can overwrite each other.
+- The bundled consumer only logs; there is no artisan command to run it yet.
+- Tests are the Laravel defaults only.
 
 ## License
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+MIT
