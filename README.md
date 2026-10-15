@@ -42,7 +42,7 @@ Requirements: PHP 8.1+, Composer, MySQL, RabbitMQ.
 
 ```bash
 composer install
-cp vendor/laravel/laravel/.env.example .env 2>/dev/null || touch .env   # then fill DB_* and the RABBITMQ_* keys below
+touch .env                  # fill DB_* and the RABBITMQ_* keys below
 php artisan key:generate
 php artisan migrate --seed
 php artisan passport:install
